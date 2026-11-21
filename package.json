@@ -1,0 +1,13 @@
+{
+  "name": "model-preview",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/cli": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "three": "0.160.0"
+  },
+  "devDependencies": { "esbuild": "^0.24.0" }
+}
