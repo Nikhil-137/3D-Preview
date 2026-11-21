@@ -73,6 +73,19 @@
   #drop strong { font-size: 20px; }
   #drop span { color: var(--muted); }
   main.dragging { outline: 3px dashed var(--accent); outline-offset: -12px; }
+  .panel {
+    position: absolute; top: 10px; right: 10px;
+    width: min(330px, calc(100% - 20px));
+    max-height: calc(100% - 20px); overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; display: none; z-index: 5;
+  }
+  .panel.open { display: block; }
+  .panel h2 { font-size: 13px; font-weight: 650; margin: 12px 0 6px; color: var(--muted); }
+  .panel h2:first-child { margin-top: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .row button { padding: 6px 10px; font-size: 14px; }
+  .panel input[type="range"] { width: 100%; accent-color: var(--accent); }
   #msg {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
@@ -92,6 +105,7 @@
   <button id="wire" type="button" aria-pressed="false">Wireframe</button>
   <button id="grid" type="button" aria-pressed="true">Grid</button>
   <button id="rotate" type="button" aria-pressed="false">Auto-rotate</button>
+  <button id="lights" type="button" aria-pressed="false">Lights</button>
   <input type="color" id="color" value="#4fb3ff" aria-label="Model color" title="Model color">
   <div id="info"></div>
 </header>
@@ -101,6 +115,32 @@
   <div id="drop">
     <strong>Drop an STL or 3MF file here</strong>
     <span>or use Open file. Files stay on your device.</span>
+  </div>
+  <div id="panel" class="panel" aria-label="Lighting and look">
+    <h2>Lights</h2>
+    <div class="row" id="lightBtns">
+      <button type="button" data-light="head">Front</button>
+      <button type="button" data-light="left">Left</button>
+      <button type="button" data-light="right">Right</button>
+      <button type="button" data-light="top">Top</button>
+      <button type="button" data-light="bottom">Bottom</button>
+      <button type="button" data-light="back">Back</button>
+      <button type="button" data-light="ambient">Soft fill</button>
+    </div>
+    <h2>Brightness</h2>
+    <input type="range" id="bright" min="0.2" max="3" step="0.1" value="1.2" aria-label="Brightness">
+    <h2>Shading</h2>
+    <div class="row" id="shadeBtns">
+      <button type="button" data-shade="solid">Solid</button>
+      <button type="button" data-shade="flat">Flat</button>
+      <button type="button" data-shade="normals">Normals</button>
+    </div>
+    <h2>Background</h2>
+    <div class="row" id="bgBtns">
+      <button type="button" data-bg="dark">Dark</button>
+      <button type="button" data-bg="gray">Gray</button>
+      <button type="button" data-bg="light">Light</button>
+    </div>
   </div>
   <div id="msg" role="status"></div>
 </main>
@@ -128,7 +168,7 @@ const msg = document.getElementById('msg');
 const colorInput = document.getElementById('color');
 
 // ---- Scene setup ----
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 stage.appendChild(renderer.domElement);
 
@@ -140,11 +180,36 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.autoRotateSpeed = 2;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.0));
-const key = new THREE.DirectionalLight(0xffffff, 1.6);
-camera.add(key);            // light follows the camera so the model is always lit
-key.position.set(1, 1.5, 2);
-scene.add(camera);
+const BGS = { dark: 0x1b1f24, gray: 0x7a828c, light: 0xeef1f4 };
+scene.background = new THREE.Color(BGS.dark);
+
+// Lights live on a rig that follows the camera's orientation,
+// so "Left" always means left of what you are looking at.
+const hemi = new THREE.HemisphereLight(0xffffff, 0x445566, 0);
+scene.add(hemi);
+const rig = new THREE.Group();
+scene.add(rig);
+const LIGHT_DIRS = {
+  head: [0, 0.25, 1], left: [-1, 0.35, 0.4], right: [1, 0.35, 0.4],
+  top: [0, 1, 0.2], bottom: [0, -1, 0.25], back: [0, 0.3, -1]
+};
+const lights = {};
+for (const [name, v] of Object.entries(LIGHT_DIRS)) {
+  const l = new THREE.DirectionalLight(0xffffff, 0);
+  l.position.set(v[0], v[1], v[2]).multiplyScalar(10);
+  rig.add(l);
+  rig.add(l.target);          // target stays at the rig centre (the model)
+  lights[name] = l;
+}
+const lightOn = { head: true, left: true, right: false, top: true, bottom: false, back: false, ambient: true };
+let brightness = 1.2;
+let shade = 'solid';
+
+function updateLights() {
+  for (const k of Object.keys(lights)) lights[k].intensity = lightOn[k] ? 1.5 * brightness : 0;
+  hemi.intensity = lightOn.ambient ? 0.45 * brightness : 0;
+}
+updateLights();
 
 let gridHelper = null;
 let current = null;         // THREE.Object3D currently shown
@@ -162,6 +227,8 @@ resize();
 
 renderer.setAnimationLoop(() => {
   controls.update();
+  rig.position.copy(controls.target);
+  rig.quaternion.copy(camera.quaternion);
   renderer.render(scene, camera);
 });
 
@@ -173,10 +240,34 @@ function showMsg(text, ms = 4000) {
   showMsg.t = setTimeout(() => msg.classList.remove('show'), ms);
 }
 
+function forEachMat(mat, fn) { (Array.isArray(mat) ? mat : [mat]).forEach(fn); }
+
+// Builds the Solid / Flat / Normals variants of a mesh's material once, then switches between them.
+function prepare(o) {
+  const u = o.userData;
+  if (u.mats) return u.mats;
+  const base = o.material;
+  const flat = Array.isArray(base) ? base.map(m => m.clone()) : base.clone();
+  forEachMat(flat, m => { m.flatShading = true; m.needsUpdate = true; });
+  u.mats = { solid: base, flat, normals: new THREE.MeshNormalMaterial({ side: THREE.DoubleSide }) };
+  return u.mats;
+}
+
+function applyLook() {
+  if (!current) return;
+  current.traverse(o => {
+    if (!o.isMesh) return;
+    const mats = prepare(o);
+    o.material = mats[shade];
+    forEachMat(o.material, m => { m.wireframe = wireframe; });
+  });
+}
+
 function disposeObject(obj) {
   obj.traverse(o => {
     if (o.geometry) o.geometry.dispose();
-    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose());
+    if (o.material) forEachMat(o.material, m => m.dispose());
+    if (o.userData.mats) Object.values(o.userData.mats).forEach(mm => forEachMat(mm, m => m.dispose()));
   });
 }
 
@@ -228,6 +319,7 @@ function show(obj, name, triangles) {
   current = wrapper;
 
   const size = frameModel(wrapper);
+  applyLook();
   dropHint.style.display = 'none';
   const fmt = n => (Math.round(n * 100) / 100).toString();
   // Because of the Z-up rotation: width = x, depth = z, height = y
@@ -261,6 +353,7 @@ function loadFile(file) {
         const geometry = new STLLoader().parse(reader.result);
         geometry.computeVertexNormals();
         const mesh = new THREE.Mesh(geometry, makeMaterial());
+        mesh.userData.tint = true;
         show(mesh, file.name, countTriangles(mesh));
       } else {
         const group = new ThreeMFLoader().parse(reader.result);
@@ -268,8 +361,8 @@ function loadFile(file) {
         group.traverse(o => {
           if (o.isMesh) {
             const hasColor = o.material && (o.material.vertexColors || (o.material.color && o.material.color.getHex() !== 0xffffff));
-            if (!hasColor) o.material = makeMaterial();
-            else { o.material.side = THREE.DoubleSide; o.material.wireframe = wireframe; }
+            if (!hasColor) { o.material = makeMaterial(); o.userData.tint = true; }
+            else forEachMat(o.material, m => { m.side = THREE.DoubleSide; });
           }
         });
         show(group, file.name, countTriangles(group));
@@ -323,15 +416,54 @@ function toggle(id, fn) {
 }
 toggle('wire', on => {
   wireframe = on;
-  if (current) current.traverse(o => { if (o.isMesh) o.material.wireframe = on; });
+  applyLook();
 });
 toggle('grid', on => { if (gridHelper) gridHelper.visible = on; });
 toggle('rotate', on => { controls.autoRotate = on; });
 
 colorInput.addEventListener('input', () => {
   modelColor.set(colorInput.value);
-  if (current) current.traverse(o => { if (o.isMesh && o.material.color) o.material.color.copy(modelColor); });
+  if (current) current.traverse(o => {
+    if (!o.isMesh || !o.userData.tint) return;
+    const mats = prepare(o);
+    forEachMat(mats.solid, m => m.color.copy(modelColor));
+    forEachMat(mats.flat, m => m.color.copy(modelColor));
+  });
 });
+
+// ---- Lights panel ----
+const panel = document.getElementById('panel');
+toggle('lights', on => panel.classList.toggle('open', on));
+
+function syncPanel() {
+  document.querySelectorAll('[data-light]').forEach(b =>
+    b.setAttribute('aria-pressed', lightOn[b.dataset.light]));
+  document.querySelectorAll('[data-shade]').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.shade === shade));
+}
+document.getElementById('lightBtns').addEventListener('click', e => {
+  const k = e.target.dataset && e.target.dataset.light;
+  if (!k) return;
+  lightOn[k] = !lightOn[k];
+  updateLights(); syncPanel();
+});
+document.getElementById('bright').addEventListener('input', e => {
+  brightness = parseFloat(e.target.value);
+  updateLights();
+});
+document.getElementById('shadeBtns').addEventListener('click', e => {
+  const k = e.target.dataset && e.target.dataset.shade;
+  if (!k) return;
+  shade = k; applyLook(); syncPanel();
+});
+document.getElementById('bgBtns').addEventListener('click', e => {
+  const k = e.target.dataset && e.target.dataset.bg;
+  if (!k) return;
+  scene.background = new THREE.Color(BGS[k]);
+  document.querySelectorAll('[data-bg]').forEach(b => b.setAttribute('aria-pressed', b.dataset.bg === k));
+});
+document.querySelector('[data-bg="dark"]').setAttribute('aria-pressed', 'true');
+syncPanel();
 </script>
 </body>
 </html>
