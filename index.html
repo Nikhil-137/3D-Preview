@@ -135,6 +135,11 @@
       <button type="button" data-shade="flat">Flat</button>
       <button type="button" data-shade="normals">Normals</button>
     </div>
+    <h2>Performance</h2>
+    <div class="row" id="perfBtns">
+      <button type="button" data-opt="twoSided">Both sides</button>
+      <button type="button" data-opt="wireMoving">Wireframe while moving</button>
+    </div>
     <h2>Background</h2>
     <div class="row" id="bgBtns">
       <button type="button" data-bg="dark">Dark</button>
@@ -168,8 +173,10 @@ const msg = document.getElementById('msg');
 const colorInput = document.getElementById('color');
 
 // ---- Scene setup ----
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const FULL_PR = Math.min(window.devicePixelRatio, 2);   // sharp, when the view is still
+const MOVE_PR = 1;                                      // cheaper, while moving
+const renderer = new THREE.WebGLRenderer({ antialias: window.devicePixelRatio < 2 });
+renderer.setPixelRatio(FULL_PR);
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -202,15 +209,30 @@ for (const [name, v] of Object.entries(LIGHT_DIRS)) {
   lights[name] = l;
 }
 const lightOn = { head: true, left: true, right: false, top: true, bottom: false, back: false, ambient: true };
+const ORDER = ['head', 'left', 'top', 'right', 'back', 'bottom'];
 let brightness = 1.2;
 let shade = 'solid';
+let twoSided = false;       // one-sided drawing is about twice as fast for closed models
+let wireMoving = false;     // keep wireframe while moving (slow on big models)
+let interacting = false;
+
+// Low quality while the view is moving: fewer lights, lower resolution, no heavy wireframe
+function lowQuality() { return interacting || controls.autoRotate; }
 
 function updateLights() {
-  for (const k of Object.keys(lights)) lights[k].intensity = lightOn[k] ? 1.5 * brightness : 0;
-  hemi.intensity = lightOn.ambient ? 0.45 * brightness : 0;
+  const active = ORDER.filter(k => lightOn[k]);
+  const used = lowQuality() ? active.slice(0, 2) : active;
+  const gain = used.length ? active.length / used.length : 0;   // keeps overall brightness similar
+  for (const k of ORDER) {
+    lights[k].visible = used.includes(k);     // hidden lights cost nothing
+    lights[k].intensity = 1.5 * brightness * gain;
+  }
+  hemi.visible = lightOn.ambient;
+  hemi.intensity = 0.45 * brightness;
 }
 updateLights();
 
+let dirty = true;
 let gridHelper = null;
 let current = null;         // THREE.Object3D currently shown
 let wireframe = false;
@@ -221,15 +243,42 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  invalidate();
 }
 new ResizeObserver(resize).observe(stage);
 resize();
 
-renderer.setAnimationLoop(() => {
-  controls.update();
+// Draw only when something changed (saves battery and heat when the model is idle)
+function invalidate() { dirty = true; }
+function loop() {
+  requestAnimationFrame(loop);
+  const moved = controls.update();
+  if (!moved && !dirty) return;
+  dirty = false;
   rig.position.copy(controls.target);
   rig.quaternion.copy(camera.quaternion);
   renderer.render(scene, camera);
+}
+requestAnimationFrame(loop);
+
+let lastLow = false;
+function refreshQuality() {
+  const low = lowQuality();
+  if (low !== lastLow) {
+    lastLow = low;
+    renderer.setPixelRatio(low ? MOVE_PR : FULL_PR);
+  }
+  updateLights();
+  applyLook();
+}
+let calmTimer = 0;
+controls.addEventListener('start', () => {
+  clearTimeout(calmTimer);
+  if (!interacting) { interacting = true; refreshQuality(); }
+});
+controls.addEventListener('end', () => {
+  clearTimeout(calmTimer);
+  calmTimer = setTimeout(() => { interacting = false; refreshQuality(); }, 250);
 });
 
 // ---- Helpers ----
@@ -255,12 +304,18 @@ function prepare(o) {
 
 function applyLook() {
   if (!current) return;
+  const wire = wireframe && (!lowQuality() || wireMoving);
+  const side = twoSided ? THREE.DoubleSide : THREE.FrontSide;
   current.traverse(o => {
     if (!o.isMesh) return;
     const mats = prepare(o);
     o.material = mats[shade];
-    forEachMat(o.material, m => { m.wireframe = wireframe; });
+    forEachMat(o.material, m => {
+      if (m.side !== side) { m.side = side; m.needsUpdate = true; }
+      m.wireframe = wire;
+    });
   });
+  invalidate();
 }
 
 function disposeObject(obj) {
@@ -296,6 +351,7 @@ function frameModel(obj) {
   camera.far = maxDim * 100;
   camera.updateProjectionMatrix();
   controls.update();
+  invalidate();
 
   if (gridHelper) { scene.remove(gridHelper); gridHelper.geometry.dispose(); }
   const gridSize = Math.ceil(maxDim * 2 / 10) * 10;
@@ -404,6 +460,7 @@ function frameResetView() {
   camera.position.set(dist * 0.8, dist * 0.7, dist * 0.8);
   controls.target.set(0, size.y / 2, 0);
   controls.update();
+  invalidate();
 }
 
 function toggle(id, fn) {
@@ -418,8 +475,8 @@ toggle('wire', on => {
   wireframe = on;
   applyLook();
 });
-toggle('grid', on => { if (gridHelper) gridHelper.visible = on; });
-toggle('rotate', on => { controls.autoRotate = on; });
+toggle('grid', on => { if (gridHelper) gridHelper.visible = on; invalidate(); });
+toggle('rotate', on => { controls.autoRotate = on; refreshQuality(); });
 
 colorInput.addEventListener('input', () => {
   modelColor.set(colorInput.value);
@@ -429,6 +486,7 @@ colorInput.addEventListener('input', () => {
     forEachMat(mats.solid, m => m.color.copy(modelColor));
     forEachMat(mats.flat, m => m.color.copy(modelColor));
   });
+  invalidate();
 });
 
 // ---- Lights panel ----
@@ -445,11 +503,11 @@ document.getElementById('lightBtns').addEventListener('click', e => {
   const k = e.target.dataset && e.target.dataset.light;
   if (!k) return;
   lightOn[k] = !lightOn[k];
-  updateLights(); syncPanel();
+  updateLights(); syncPanel(); invalidate();
 });
 document.getElementById('bright').addEventListener('input', e => {
   brightness = parseFloat(e.target.value);
-  updateLights();
+  updateLights(); invalidate();
 });
 document.getElementById('shadeBtns').addEventListener('click', e => {
   const k = e.target.dataset && e.target.dataset.shade;
@@ -460,8 +518,17 @@ document.getElementById('bgBtns').addEventListener('click', e => {
   const k = e.target.dataset && e.target.dataset.bg;
   if (!k) return;
   scene.background = new THREE.Color(BGS[k]);
+  invalidate();
   document.querySelectorAll('[data-bg]').forEach(b => b.setAttribute('aria-pressed', b.dataset.bg === k));
 });
+document.getElementById('perfBtns').addEventListener('click', e => {
+  const k = e.target.dataset && e.target.dataset.opt;
+  if (!k) return;
+  if (k === 'twoSided') twoSided = !twoSided; else wireMoving = !wireMoving;
+  e.target.setAttribute('aria-pressed', k === 'twoSided' ? twoSided : wireMoving);
+  applyLook();
+});
+document.querySelectorAll('[data-opt]').forEach(b => b.setAttribute('aria-pressed', 'false'));
 document.querySelector('[data-bg="dark"]').setAttribute('aria-pressed', 'true');
 syncPanel();
 </script>
