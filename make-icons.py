@@ -4,13 +4,17 @@ from PIL import Image, ImageDraw
 
 SRC = 'icon.png'
 RES = 'android/app/src/main/res'
-BG = '#171b21'
 
 if not os.path.exists(SRC):
     print('icon.png not found, keeping the default icon')
     sys.exit(0)
 
-src = Image.open(SRC).convert('RGB')
+img = Image.open(SRC).convert('RGB')
+BGC = img.getpixel((5, 5))            # background color sampled from the picture's corner
+BG = '#%02x%02x%02x' % BGC
+side = max(img.size)                  # pad to a square so the whole picture is kept
+src = Image.new('RGB', (side, side), BGC)
+src.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
 legacy = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
 fore = {'mdpi': 108, 'hdpi': 162, 'xhdpi': 216, 'xxhdpi': 324, 'xxxhdpi': 432}
 
@@ -29,7 +33,12 @@ for d in legacy:
     sq = src.resize((s, s), Image.LANCZOS)
     rounded(sq, 0.18).save(f'{folder}/ic_launcher.png')
     rounded(sq, 0.5).save(f'{folder}/ic_launcher_round.png')
-    src.resize((fore[d], fore[d]), Image.LANCZOS).save(f'{folder}/ic_launcher_foreground.png')
+    # adaptive icon: shrink so the whole picture stays inside the launcher's mask
+    f = fore[d]
+    layer = Image.new('RGB', (f, f), BGC)
+    inner = int(f * 0.66)
+    layer.paste(src.resize((inner, inner), Image.LANCZOS), ((f - inner) // 2, (f - inner) // 2))
+    layer.save(f'{folder}/ic_launcher_foreground.png')
 
 os.makedirs(f'{RES}/mipmap-anydpi-v26', exist_ok=True)
 xml = ('<?xml version="1.0" encoding="utf-8"?>\n'
