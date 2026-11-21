@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>3D-Preview</title>
+  <!-- Online CDNs for GitHub Pages (Swap to local .js files later for offline APK) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fflate@0.7.4/umd/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/FBXLoader.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: #0f172a; color: #f8fafc; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+    header { background: #1e293b; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; z-index: 10; }
+    h1 { font-size: 16px; font-weight: 600; color: #38bdf8; }
+    .btn { background: #0284c7; color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; }
+    .btn:active { background: #0369a1; }
+    #viewer { flex: 1; width: 100%; position: relative; touch-action: none; }
+    #stats { position: absolute; bottom: 16px; left: 16px; right: 16px; max-width: 360px; background: rgba(15, 23, 42, 0.88); padding: 10px 14px; border-radius: 8px; border: 1px solid #334155; font-size: 13px; line-height: 1.5; pointer-events: none; }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>3D-Preview</h1>
+    <label class="btn">
+      Import 3D File
+      <input type="file" id="fileInput" accept=".3mf,.stl,.obj,.glb,.gltf,.fbx" />
+    </label>
+  </header>
+  <div id="viewer">
+    <div id="stats">Supports .3MF, .STL, .OBJ, .GLB, .GLTF, .FBX<br><span style="color:#94a3b8;font-size:11px;">(Export Blender .blend files as .GLB or .STL)</span></div>
+  </div>
+
+  <script>
+    const container = document.getElementById('viewer');
+    const stats = document.getElementById('stats');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0f172a);
+
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 5000);
+    camera.position.set(120, 120, 120);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.85);
+    dirLight.position.set(100, 200, 150);
+    scene.add(dirLight);
+
+    const grid = new THREE.GridHelper(245, 24, 0x38bdf8, 0x1e293b);
+    scene.add(grid);
+
+    let currentModel = null;
+    const defaultMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.4, metalness: 0.1 });
+
+    function fitAndMeasure(object, fileName) {
+      if (currentModel) scene.remove(currentModel);
+      currentModel = object;
+
+      object.traverse((child) => {
+        if (child.isMesh && !child.material) {
+          child.material = defaultMat;
+        }
+      });
+
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+
+      object.position.x -= center.x;
+      object.position.z -= center.z;
+      object.position.y -= box.min.y;
+      scene.add(object);
+
+      const maxDim = Math.max(size.x, size.y, size.z) || 50;
+      camera.position.set(maxDim * 1.6, maxDim * 1.4, maxDim * 1.6);
+      controls.target.set(0, size.y / 2, 0);
+      controls.update();
+
+      stats.innerHTML = `<strong>${fileName}</strong><br>X: ${size.x.toFixed(1)} mm | Y: ${size.z.toFixed(1)} mm | Z: ${size.y.toFixed(1)} mm`;
+    }
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      stats.textContent = 'Loading ' + file.name + '...';
+      const reader = new FileReader();
+      const ext = file.name.split('.').pop().toLowerCase();
+
+      reader.onload = (event) => {
+        try {
+          const data = event.target.result;
+          if (ext === 'stl') {
+            const geom = new THREE.STLLoader().parse(data);
+            fitAndMeasure(new THREE.Mesh(geom, defaultMat), file.name);
+          } else if (ext === '3mf') {
+            const group = new THREE.ThreeMFLoader().parse(data);
+            fitAndMeasure(group, file.name);
+          } else if (ext === 'obj') {
+            const text = new TextDecoder().decode(data);
+            const group = new THREE.OBJLoader().parse(text);
+            fitAndMeasure(group, file.name);
+          } else if (ext === 'glb' || ext === 'gltf') {
+            new THREE.GLTFLoader().parse(data, '', (gltf) => {
+              fitAndMeasure(gltf.scene, file.name);
+            }, (err) => {
+              stats.textContent = 'GLTF Error: ' + err.message;
+            });
+          } else if (ext === 'fbx') {
+            const group = new THREE.FBXLoader().parse(data, '');
+            fitAndMeasure(group, file.name);
+          } else {
+            stats.textContent = 'Unsupported format: .' + ext;
+          }
+        } catch (err) {
+          stats.textContent = 'Error parsing file: ' + err.message;
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
